@@ -1,0 +1,218 @@
+in controller 
+
+  // import mysql data
+       public function importStagesInMYSQl(Request $request)
+       {
+           
+           $file = $request->file('mysql');
+           $sqlContent = file_get_contents($file->getRealPath());
+   
+           try {
+               // Split the SQL content into individual statements
+               $statements = array_filter(array_map('trim', explode(';', $sqlContent)));
+   
+               
+               foreach ($statements as $statement) {
+                   if (!empty($statement)) {
+   
+                       // Extract the VALUES() section using regular expression
+                       if (preg_match("/VALUES\s*\((.*?)\)/i", $statement, $matches)) {
+                           $values = explode(',', $matches[1]);
+   
+                           // Clean the values
+                           $id = trim(str_replace(["'", "`"], '', $values[0]));
+                           $name = trim(str_replace(["'", "`"], '', $values[1]));
+                           $stage_duration = trim(str_replace(["'", "`"], '', $values[2]));
+                           $created_at = trim(str_replace(["'", "`"], '', $values[3]));
+                           $updated_at = trim(str_replace(["'", "`"], '', $values[4]));
+   
+                           // Use updateOrCreate to insert or update the organizer record
+                           Stage::updateOrCreate(
+                               ['id' => $id], // Check for existing record by ID
+                               [
+                                   'stage_name' => $name,
+                                   'stage_duration' => $stage_duration,
+                                   'created_at' => $created_at,
+                                   'updated_at' => $updated_at
+                               ]
+                           );
+                       }
+                   }
+               }
+   
+               return back()->with('success', 'Stage data imported or updated successfully!');
+           } catch (\Exception $e) {
+               return back()->with('error', 'Import failed: ' . $e->getMessage());
+           }
+       }
+   
+       // export mysql data
+       public function exportStagesToMySQL(Request $request)
+       {
+           
+           $ids = explode(',', $request->query('ids'));
+           $stages = Stage::whereIn('id', $ids)->orderBy('created_at','desc')->get();
+           $filename = "stages_export.sql";
+   
+           $sql = "";
+   
+           foreach ($stages as $stage) {
+               $columns = array_keys($stage->toArray());
+               $values = array_values($stage->toArray());
+   
+               $columns = implode('`, `', $columns);
+               $values = array_map(function ($value) {
+                   return addslashes($value); // Escape special characters
+               }, $values);
+               $values = implode("', '", $values);
+   
+               $sql .= "INSERT INTO `stages` (`$columns`) VALUES ('$values');\n";
+           }
+   
+           // Storage folder ke andar temporary save karein
+           Storage::disk('local')->put($filename, $sql);
+   
+           // Ab user ko download karwana
+           return response()->download(storage_path("app/{$filename}"))->deleteFileAfterSend(true);
+       }
+
+
+in blade file 
+   <div class="btn-group mb-2 mb-md-0" role="group">
+                        <a href="{{route('stages.export-simple-file')}}" id="export-simple-file" class="btn btn-gradient-simple">
+                            <i class="fas fa-download"></i> Download Simple
+                        </a>
+                        <button type="button" id="pdf" class="btn btn-gradient-pdf">
+                            <i class="mdi mdi-file-pdf ml-2"></i> Export PDF
+                        </button>
+                        <a id="excel" class="btn export-excel btn-gradient-xlsx">
+                            <i class="mdi mdi-file-excel ml-2"></i> Export XLSX
+                        </a>
+                        <button type="button" id="csv" class="export-csv btn btn-gradient-csv">
+                            <i class="mdi mdi-file-excel ml-2"></i> Export CSV
+                        </button>
+                        <button type="button" id="mysql" class="export-csv btn btn-gradient-mysql">
+                            <i class="mdi mdi-file-excel ml-2"></i> Export MYSQL
+                        </button>
+
+
+                    </div>
+                <form action="{{route('stages.importInMYSQl')}}" method="post" enctype="multipart/form-data">
+                    @csrf
+                    <input type="file" name="mysql" class="form-control" accept=".sql" required>
+                    @error('mysql')
+                    <p style="color: red;">{{$message}}</p>
+                    @enderror
+                    <p class="p-2">
+                  
+                  <button type="submit" class="btn btn-primary">
+                    <i class="mdi mdi-upload mr-2"></i>
+                    <span class="d-none d-sm-inline">Upload</span>
+                  </button>
+
+              </form>
+
+
+in web.php
+Route::post('/stages-import-sql', [StagesController::class, 'importStagesInMYSQl'])->name('stages.importInMYSQl');
+Route::get('/stages-export-sql', [StagesController::class, 'exportStagesToMySQL'])->name('stages.exportInMYSQL');
+
+
+in script
+<!-- start js -->
+
+<script>
+    document.addEventListener("DOMContentLoaded", function() {
+        const selectAllCheckbox = document.getElementById('selectAll');
+        const checkboxes = document.querySelectorAll('.selectOneByOne');
+        const deleteSelected = document.getElementById('deleteSelected');
+        const exportButtons = document.querySelectorAll('#excel, #csv, #pdf, #mysql');
+
+        // Handle Select All functionality
+        if (selectAllCheckbox) {
+            selectAllCheckbox.addEventListener('change', function() {
+                checkboxes.forEach(cb => cb.checked = this.checked);
+            });
+        }
+
+        // Individual checkbox sync with Select All
+        checkboxes.forEach(cb => {
+            cb.addEventListener('change', function() {
+                if (!this.checked) {
+                    selectAllCheckbox.checked = false;
+                } else if (Array.from(checkboxes).every(c => c.checked)) {
+                    selectAllCheckbox.checked = true;
+                }
+            });
+        });
+
+        // Delete selected items
+        if (deleteSelected) {
+            deleteSelected.addEventListener("click", function() {
+                const selectedIds = Array.from(checkboxes)
+                    .filter(cb => cb.checked)
+                    .map(cb => cb.getAttribute('data-id'));
+
+                if (!selectedIds.length) {
+                    return alert("Please select at least one item to delete.");
+                }
+
+                if (!confirm("Are you sure you want to delete the selected items?")) return;
+
+                $.ajax({
+                    type: "POST",
+                    url: "{{ route('stages.deleteSelected') }}",
+                    data: {
+                        ids: selectedIds,
+                        _token: '{{ csrf_token() }}',
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            toastr.success(response.message);
+                            setTimeout(() => location.reload(), 1500);
+                        }
+                    },
+                    error: function(xhr) {
+                        if (xhr.responseJSON?.message) {
+                            alert(xhr.responseJSON.message);
+                        }
+                    },
+                });
+            });
+        }
+
+        // Export selected records
+        exportButtons.forEach(button => {
+            button.addEventListener('click', function() {
+                const selectedIds = Array.from(checkboxes)
+                    .filter(cb => cb.checked)
+                    .map(cb => cb.getAttribute('data-id'));
+
+                if (!selectedIds.length) {
+                    return alert('Please select at least one record.');
+                }
+
+                const exportType = this.id;
+                let exportUrl = "";
+
+                switch (exportType) {
+                    case 'excel':
+                        exportUrl = `/stages-export-xlsx?ids=${selectedIds.join(',')}`;
+                        break;
+                    case 'csv':
+                        exportUrl = `/stages-export-csv?ids=${selectedIds.join(',')}`;
+                        break;
+                    case 'pdf':
+                        exportUrl = `/stages-export-pdf?ids=${selectedIds.join(',')}`;
+                        break;
+                    case 'mysql': // Handle Export MySQL
+                        exportUrl = `/stages-export-sql?ids=${selectedIds.join(',')}`;
+                        break;
+                }
+
+                window.location.href = exportUrl;
+            });
+        });
+    });
+</script>
+
